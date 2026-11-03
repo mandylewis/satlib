@@ -346,6 +346,7 @@ def Antonanzas2018_model1(tracker_theta_ref,poa_eff,ghi, timestamps,tracker_spee
     r"""
     Calculate tracker angle according to Antonanzas 2018 model 1. 
     When GHI > POA for more than 5 mins, set the tracker to horizontal.
+    See section 4.2 of [1]_.
 
     The paper does not specify how and when to return to regular tracking. 
     Here, we assume that we return to regular tracking when GHI < POA for more than 5 minutes.
@@ -364,6 +365,19 @@ def Antonanzas2018_model1(tracker_theta_ref,poa_eff,ghi, timestamps,tracker_spee
         Maximum tracker speed in degrees per minute. [°/min]
     persistence_min: float, default 5
         Time in minutes to hold a condition before changing set angle
+
+    Returns
+    -------
+    tracker_theta : numeric
+        New tracker rotation angle. [°]
+
+    References
+    ----------
+    .. [1] J. Antonanzas, R. Urraca, F. J. Martinez-de-Pison, and F. Antonanzas,
+        “Optimal solar tracking strategy to increase irradiance in the plane of 
+        array under cloudy conditions: A study across Europe,” Sol. Energy, vol. 
+        163, pp. 122-130, Mar. 2018,
+        :doi: `10.1016/j.solener.2018.01.080.`
     """
 
     # Build DatetimeIndex from timestamps 
@@ -408,3 +422,12 @@ def Antonanzas2018_model1(tracker_theta_ref,poa_eff,ghi, timestamps,tracker_spee
     tracker_theta = clip_speed(target, tracker_speed, how="lag")
     
     return tracker_theta
+
+
+def Antonanzas2018_model2():
+
+
+
+
+
+return tracker_theta
