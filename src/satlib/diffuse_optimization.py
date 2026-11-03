@@ -1,7 +1,11 @@
+import stat
+
 import numpy as np
+import pandas as pd
 import pvlib
 import satlib
 from satlib._trigd import sind, cosd
+from satlib.limits import clip_speed
 
 def get_surface_azimuth(solar_azimuth, axis_azimuth):
     # for an HSAT tracker, get surface azimuth from solar azimuth and axis azimuth (all in degrees)
@@ -336,4 +340,71 @@ def munoz2024_diffusetrackerangle(tracker_theta_ref,POA,GHI):
     # take the reference tracking angle if GHI < GPOA, and 0 if GHI > GPOA
     tracker_theta = np.where(flat_tracking_flag, 0, tracker_theta_ref)
 
+    return tracker_theta
+
+def Antonanzas2018_model1(tracker_theta_ref,poa_eff,ghi, timestamps,tracker_speed = 18.3,persistence_min = 5):
+    r"""
+    Calculate tracker angle according to Antonanzas 2018 model 1. 
+    When GHI > POA for more than 5 mins, set the tracker to horizontal.
+
+    The paper does not specify how and when to return to regular tracking. 
+    Here, we assume that we return to regular tracking when GHI < POA for more than 5 minutes.
+    
+    Parameters
+    ----------
+    tracker_theta_ref : numeric
+        Reference tracker rotation angle. [°]
+    POA : numeric
+        Plane-of-array irradiance at the reference tracker angle. [W/m^2]
+    GHI : numeric
+        Global horizontal irradiance. [W/m^2]
+    timestamps: pandas Datetime
+        Timestamps of the tracker angles and irradiance values.
+    tracker_speed: float, default 18.3
+        Maximum tracker speed in degrees per minute. [°/min]
+    persistence_min: float, default 5
+        Time in minutes to hold a condition before changing set angle
+    """
+
+    # Build DatetimeIndex from timestamps 
+    idx = pd.DatetimeIndex(timestamps)
+
+    # Reference tracker angle on ts index. assume NaN values are 0 degrees
+    ref = pd.Series(np.asarray(tracker_theta_ref, dtype=float), index=idx).fillna(0)
+
+    # True where GHI > POA
+    want_flat = pd.Series(np.asarray(ghi) > np.asarray(poa_eff), index=idx)
+
+    # Minutes between timesteps; the first row has no predecessor, so assume 1 min
+    # Q: how does pvlib handle similar assumptions? verify.
+    dt = idx.to_series().diff().dt.total_seconds().div(60).fillna(1.0)
+
+    # Label each tracking block with a unique id
+    run_id = (want_flat != want_flat.shift()).cumsum()
+
+    # Minutes the current condition has lasted (sum of dt for each block)
+    run_min = dt.groupby(run_id).cumsum()
+
+    # if GHI > POA for over persistence_min, enter = true
+    enter = want_flat & (run_min >= persistence_min)
+
+    # if GHI <= POA for over persistence_min, enter = false
+    leave = ~want_flat & (run_min >= persistence_min)
+
+    # create "state variable: 1.0 = enter flat, 0.0 = leave flat, NaN = no event
+    # note: this might not be working?
+    state = pd.Series(np.where(enter, 1.0, np.where(leave, 0.0, np.nan)), index=idx)
+
+    # hold tracking mode until a new event occurs
+    flat = state.ffill().fillna(0).astype(bool)
+
+    # start moving tracker in the timestep after the condition is met
+    flat = flat.shift(1, fill_value=False)
+
+    # Target angle: 0° (horizontal) when flat, otherwise the reference tracking angle
+    target = ref.where(~flat, 0.0)
+
+    # apply tracker speed limit with a lag
+    tracker_theta = clip_speed(target, tracker_speed, how="lag")
+    
     return tracker_theta
