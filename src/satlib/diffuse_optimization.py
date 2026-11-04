@@ -1,3 +1,4 @@
+from pyexpat import model
 import stat
 
 import numpy as np
@@ -342,7 +343,7 @@ def munoz2024_diffusetrackerangle(tracker_theta_ref,POA,GHI):
 
     return tracker_theta
 
-def Antonanzas2018_model1(tracker_theta_ref,poa_eff,ghi, timestamps,tracker_speed = 18.3,persistence_min = 5):
+def Antonanzas2018_model1(tracker_theta_ref,poa,ghi, timestamps,tracker_speed = 18.3,persistence_min = 5):
     r"""
     Calculate tracker angle according to Antonanzas 2018 model 1. 
     When GHI > POA for more than 5 mins, set the tracker to horizontal.
@@ -387,23 +388,23 @@ def Antonanzas2018_model1(tracker_theta_ref,poa_eff,ghi, timestamps,tracker_spee
     ref = pd.Series(np.asarray(tracker_theta_ref, dtype=float), index=idx).fillna(0)
 
     # True where GHI > POA
-    want_flat = pd.Series(np.asarray(ghi) > np.asarray(poa_eff), index=idx)
+    flat_tracking_flag = pd.Series(np.asarray(ghi) > np.asarray(poa), index=idx)
 
     # Minutes between timesteps; the first row has no predecessor, so assume 1 min
     # Q: how does pvlib handle similar assumptions? verify.
     dt = idx.to_series().diff().dt.total_seconds().div(60).fillna(1.0)
 
     # Label each tracking block with a unique id
-    run_id = (want_flat != want_flat.shift()).cumsum()
+    run_id = (flat_tracking_flag != flat_tracking_flag.shift()).cumsum()
 
     # Minutes the current condition has lasted (sum of dt for each block)
     run_min = dt.groupby(run_id).cumsum()
 
     # if GHI > POA for over persistence_min, enter = true
-    enter = want_flat & (run_min >= persistence_min)
+    enter = flat_tracking_flag & (run_min >= persistence_min)
 
     # if GHI <= POA for over persistence_min, enter = false
-    leave = ~want_flat & (run_min >= persistence_min)
+    leave = ~flat_tracking_flag & (run_min >= persistence_min)
 
     # create "state variable: 1.0 = enter flat, 0.0 = leave flat, NaN = no event
     # note: this might not be working?
@@ -424,10 +425,157 @@ def Antonanzas2018_model1(tracker_theta_ref,poa_eff,ghi, timestamps,tracker_spee
     return tracker_theta
 
 
-def Antonanzas2018_model2():
+def Antonanzas2018_model2(tracker_theta_ref,poa_predicted_hrly,ghi_predicted_hrly):
+    r"""
+    Calculate tracker angle according to Antonanzas 2018 model 2. 
+    Take hourly numerical weather prediction (NWP) of GHI as a 24 hr forecast starting at 00:00 [1]_.
+
+    Estimate DHI from BRL model as in [2]_, then get DNI from closure equation.
+
+    Calculate expected POA and compare with expected GHI.
+    When predicted GHI > predicted POA for the coming hour, stow tracker horizontally for that hour.
+    When predicted POA <= predicted GHI for the coming hour, track normally.
+
+    Q: forecast data: right- left- center-label? all 3 (tracker ref, poa, ghi) should follow same convention
+
+    
+    Parameters
+    ----------
+    tracker_theta_ref : numeric
+        Reference tracker rotation angle. [°]
+    poa_predicted_hrly : numeric
+        Predicted hourly plane-of-array irradiance at the reference tracker angle. [W/m^2]
+    ghi_predicted_hrly : numeric
+        Predicted hourly global horizontal irradiance. [W/m^2]
+    tracker_speed: float, default 18.3
+        Maximum tracker speed in degrees per minute. [°/min]
+    persistence_min: float, default 5
+        Time in minutes to hold a condition before changing set angle
+
+    Returns
+    -------
+    tracker_theta : numeric
+        New tracker rotation angle. [°]
+    
+    References
+    ----------
+    .. [1] J. Antonanzas, R. Urraca, F. J. Martinez-de-Pison, and F. Antonanzas,
+        “Optimal solar tracking strategy to increase irradiance in the plane of 
+        array under cloudy conditions: A study across Europe,” Sol. Energy, vol. 
+        163, pp. 122-130, Mar. 2018,
+        :doi: `10.1016/j.solener.2018.01.080.`
+    """
+
+    # stow module horizontally when predicted GHI > predicted POA for the coming hour
+    flat_tracking_flag = ghi_predicted_hrly > poa_predicted_hrly
+
+    # when the flat_tracking_flag is true, set tracker angle to zero. 
+    tracker_theta = np.where(flat_tracking_flag, 0.0, tracker_theta_ref)
+
+
+    # Q: how to then take and test against "real" data, what is the best approach?
+
+    return tracker_theta
 
 
 
+BRL_COEFFICIENTS = {
+    'generic': {'b0': -5.38, 'b1': 6.63, 'b2': 0.006,
+                'b3': -0.007, 'b4': 1.75, 'b5': 1.31},
+}
+
+def BRL_model_2010(timestamps,ghi,ghi_extra,ast,solar_zenith,model='generic'):
+    r"""
+    Implement the BRL 2010 decomposition model.
+    Find DHI fraction from clearness index, daily clearness index, 
+    solar altitude, apparent solar time and persistence of global radiation.
+
+    Note: this approach was originally developed for hourly data.
 
 
-return tracker_theta
+    Parameters
+    ----------
+    timestamps: pandas Datetime
+        Timestamps of the input data.
+    ghi : pd.Series
+        Global horizontal irradiance. [W/m^2]
+    ghi_extra : pd.Series
+        Extraterrestrial irradiance. [W/m^2]
+    ast : pd.Series
+        Apparent solar time. [hours]
+    solar_zenith : pd.Series
+        Solar zenith angle. [°]
+    model : str, default 'generic'
+        The coefficient model to apply.
+
+    Returns
+    -------
+    d : numeric
+        Diffuse fraction. [dimensionless]
+
+    References
+    ----------
+    .. [1] B. Ridley, J. Boland, and P. Lauret, “Modelling of diffuse solar fraction 
+        with multiple predictors,” Renew. Energy, vol. 35, no. 2, pp. 478-483, Feb. 2010.
+        :doi: `10.1016/j.renene.2009.07.018`
+    
+    """
+
+    # assign BRL coefficients
+    c = BRL_COEFFICIENTS[model]
+
+    # elevation angle from zenith angle
+    solar_elevation = 90 - solar_zenith
+
+    #get hourly clearness index, kt = GHI / GHI_extra
+    kt = (ghi / ghi_extra).where(ghi_extra > 0) # kt for each daytime hour
+
+    #group data by day and get daily Kt
+    dates = timestamps.normalize() #get list of dates
+    daily_ghi = ghi.groupby(dates).transform('sum')         #sum of ghi for the day
+    daily_h0 = ghi_extra.groupby(dates).transform('sum')    #sum of extraterrestrial irradiance for the day
+    daily_kt = (daily_ghi / daily_h0).where(daily_h0 > 0)         #ratio of daily GHI to daily extraterrestrial irradiance, K_t
+
+
+    # calculate "persistence", phi, the average of the lead/lag of the clearness index.
+    # take average of each point with the value 2 indices later, and shift forward by 1
+    # eq. 6 from [1]
+    kt_p1 = kt.shift(1)
+    kt_m1 = kt.shift(-1)
+    psi = pd.concat([kt_m1, kt_p1], axis=1).mean(axis=1, skipna=True)
+
+    # calculate the diffuse fraction, d
+    # eq. 9 from [1]
+    z = (c['b0']
+        + c['b1'] * kt
+        + c['b2'] * ast
+        + c['b3'] * solar_elevation
+        + c['b4'] * daily_kt
+        + c['b5'] * psi)
+    d = 1.0 / (1.0 + np.exp(z))
+
+    #daytime filter
+    day = (solar_elevation > 0) & (ghi_extra > 0)
+    d = d.where(day, 0.0)
+
+    return d
+
+def Antonanzas2018_POAcalc():
+    r"""
+    Calculate POA on a tilted plane as described in Antonanzas 2018, section 2.2.
+    Q: does this differ from the other approaches and does it matter...?
+
+
+    
+    
+    
+    """
+
+    # use described AOI loss approaches in addition to transposition and other eqns
+    #  
+
+
+    POA = 0
+
+
+    return POA
