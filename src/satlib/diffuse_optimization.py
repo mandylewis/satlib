@@ -1,6 +1,3 @@
-from pyexpat import model
-import stat
-
 import numpy as np
 import pandas as pd
 import pvlib
@@ -559,6 +556,32 @@ def BRL_model_2010(timestamps,ghi,ghi_extra,ast,solar_zenith,model='generic'):
     d = d.where(day, 0.0)
 
     return d
+
+def apparentsolartime(timestamps, lon, eqn_of_time):
+    r"""
+    Calculate the apparent solar time from the timestamp (center-label), longitude, and equation of time.
+
+    Parameters
+    ----------
+    timestamps: pandas Datetime
+        Timestamps of the input data (center-label).
+    lon : numeric
+        Longitude of the location. [°]
+    eqn_of_time : numeric
+        Equation of time. [minutes]
+    
+    Returns
+    -------
+    ast : pandas.Series
+        Apparent solar time, indexed by timestamps. [hours]
+    """
+
+    hour_angle = pvlib.solarposition.hour_angle(timestamps, lon, eqn_of_time)
+    ast_values = (hour_angle / 15 + 12) % 24 
+
+    ast = pd.Series(ast_values, index=timestamps)
+
+    return ast
 
 def Antonanzas2018_POAcalc():
     r"""
