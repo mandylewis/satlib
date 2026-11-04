@@ -487,8 +487,8 @@ def BRL_model_2010(timestamps,ghi,ghi_extra,ast,solar_zenith,model='generic'):
     Find DHI fraction from clearness index, daily clearness index, 
     solar altitude, apparent solar time and persistence of global radiation.
 
-    Note: this approach was originally developed for hourly data.
-
+    Note: this approach was originally developed for hourly data, 
+    but is applied here to any timestep.
 
     Parameters
     ----------
@@ -582,6 +582,39 @@ def apparentsolartime(timestamps, lon, eqn_of_time):
     ast = pd.Series(ast_values, index=timestamps)
 
     return ast
+
+def decomposition_from_DHIfrac(d,solar_zenith,ghi):
+    r"""
+    Take diffuse fraction, solar zenith angle, and GHI to calculate DHI and DNI.
+
+    Parameters
+    ----------
+    d : Series
+        Diffuse fraction. [dimensionless]   
+    solar_zenith : Series
+        Solar zenith angle. [degrees]
+    ghi : Series
+        Global horizontal irradiance. [W/m^2]
+
+    Returns
+    -------
+    dhi : Series
+        Diffuse horizontal irradiance. [W/m^2]
+    dni : Series
+        Direct normal irradiance. [W/m^2]
+    """
+
+    # DHI = GHI * dhi_fraction (d)
+    dhi = d*ghi
+
+    # direct irradiance in horizontal plane = GHI - DHI
+    # DNI = direct irradiance in horizontal plane / cos(solar zenith)
+    dni = pvlib.irradiance.dni(ghi, dhi, solar_zenith)
+
+    # for high zenith angles, dni will return NaN, so replace with 0.
+    dni = dni.fillna(0)
+
+    return dhi, dni
 
 def Antonanzas2018_POAcalc():
     r"""
