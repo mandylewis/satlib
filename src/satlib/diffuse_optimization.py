@@ -4,6 +4,7 @@ import pvlib
 import satlib
 from satlib._trigd import sind, cosd
 from satlib.limits import clip_speed
+from pvlib import tools
 
 def get_surface_azimuth(solar_azimuth, axis_azimuth):
     # for an HSAT tracker, get surface azimuth from solar azimuth and axis azimuth (all in degrees)
@@ -616,14 +617,15 @@ def decomposition_from_DHIfrac(d,solar_zenith,ghi):
 
     return dhi, dni
 
-def Antonanzas2018_POAcalc():
+def Antonanzas2018_POAcalc(surface_tilt,surface_azimuth,solar_zenith,solar_azimuth,ghi,dhi,dni,albedo=0.24, a_r=0.17):
     r"""
     Calculate POA on a tilted plane as described in Antonanzas 2018, section 2.2.
     Q: does this differ from the other approaches and does it matter...?
 
 
-    
-    
+    1. DNI on poa: G_{direct} = DNI * cos(theta_i) (eq. 12 adapted for DNI)
+    2. Reflected irradiance on poa: G_{ground} = GHI * albedo * (1 - cos(beta))/2 (eq. 13)
+    3. Diffuse irradiance on poa: Muneer model
     
     """
 
@@ -631,7 +633,136 @@ def Antonanzas2018_POAcalc():
     #  
 
 
-    POA = 0
+    #calculate aoi for direct irradiance on tilted plane
+    aoi = pvlib.irradiance.aoi(surface_tilt, surface_azimuth, solar_zenith, solar_azimuth)
+    #get direct irradiance on tilted plane
+    direct_poa = dni * cosd(aoi) 
+
+    #reflected irradiance on tilted plane
+    reflected_poa = ghi * albedo * (1 - cosd(surface_tilt))/2
+
+    #apply muneer model for diffuse irradiance on tilted plane
+
+    poa_total = direct_poa + reflected_poa
 
 
-    return POA
+    return poa_total
+
+
+
+
+"""
+The following implementation of the muneer model is taken from the PR here:
+https://github.com/pvlib/pvlib-python/pull/2184
+
+written by BernatNicolau.
+"""
+
+def muneer1990(surface_tilt, surface_azimuth, dhi, ghi, dni_extra, b=5.73,
+            solar_zenith=None, solar_azimuth=None, projection_ratio=None):
+    r"""
+    Determine sky diffuse irradiance on a tilted surface using the
+    Muneer model.
+
+    This Muneer transposition model is described in [1]_.
+
+    Parameters
+    ----------
+    surface_tilt : numeric
+        Surface tilt angles in decimal degrees. ``surface_tilt`` must
+        be >=0 and <=180. The tilt angle is defined as degrees from horizontal
+        (e.g. surface facing up = 0, surface facing horizon = 90)
+
+    surface_azimuth : numeric
+        Surface azimuth angles in decimal degrees. ``surface_azimuth``
+        must be >=0 and <=360. The azimuth convention is defined as degrees
+        east of north (e.g. North = 0, South=180 East = 90, West = 270).
+
+    dhi : numeric
+        Diffuse horizontal irradiance. [W/m^2]Expand commentComment on line R1030Resolved
+
+    ghi : numeric
+        Global horizontal irradiance. [W/m^2]
+
+    dni_extra : numeric
+        Extraterrestrial normal irradiance. [W/m^2]
+
+    b : numeric, default 5.73
+        Radiance distribution index, introduced by Moon and Spencer [2]_
+        to model luminance distribution of overcast sky. [unitless]
+        Recommended values from [1]_:
+
+           - isotropic: b = 0
+           - shaded surface: b = 5.73 (default)
+           - sunlit surface, overcast sky: b = 1.68
+           - sunlit surface, non-overcast sky: b = -0.62
+
+    solar_zenith : numeric
+        Solar apparent (refraction-corrected) zenith angles in decimal
+        degrees. Must supply ``solar_zenith`` and ``solar_azimuth`` or
+        supply ``projection_ratio``.
+
+    solar_azimuth : numeric
+        Solar azimuth angles in decimal degrees. Must supply
+        ``solar_zenith`` and ``solar_azimuth`` or supply
+        ``projection_ratio``.
+
+    projection_ratio : numeric, optional
+        Ratio of cosine of angle of incidence to cosine of solar zenith
+        angle. [unitless]
+
+            Returns
+    -------
+    poa_sky_diffuse : numeric
+        In-plane diffuse irradiance from the sky. [W/m^2]Expand commentComment on line R1065Resolved
+
+    References
+    ----------
+    .. [1] Muneer, T., 1990. Solar radiation model for Europe. Building
+       Services Engineering Research and Technology 11, 153-163.
+       :doi:`10.1177/014362449001100405`
+
+    .. [2] Moon, P., and Spencer, D. E., 1942. Illumination from a
+       non-uniform sky.
+       Trans. Illum. Eng. Soc. (London) 37, 707-725.
+    """
+
+    cos_solar_zenith = tools.cosd(solar_zenith)
+    # if necessary, calculate ratio of titled and horizontal beam irradiance
+    if projection_ratio is None:
+        cos_tt = pvlib.irradiance.aoi_projection(surface_tilt, surface_azimuth,
+                                solar_zenith, solar_azimuth)
+        cos_tt = np.maximum(cos_tt, 0)  # GH 526
+        Rb = cos_tt / np.maximum(cos_solar_zenith, 0.01745)  # GH 432
+    else:
+        Rb = projection_ratio
+
+    T_term1 = (1 + tools.cosd(surface_tilt)) * 0.5
+    T_term2 = 2 * b / (np.pi * (3 + 2 * b))
+    T_term3 = (
+        tools.sind(surface_tilt)
+        - np.radians(surface_tilt) * tools.cosd(surface_tilt)
+        - np.pi * (1 - tools.cosd(surface_tilt)) * 0.5
+    )
+    T = T_term1 + T_term2 * T_term3
+
+    F = pvlib.irradiance.clearness_index(
+        ghi - dhi, solar_zenith, dni_extra)
+
+    solar_elevation = np.pi/2 - np.radians(solar_zenith)
+
+    numer_low = tools.sind(surface_tilt) * \
+        tools.cosd(surface_azimuth - solar_azimuth)
+    denom_low = 0.1 - 0.008 * solar_elevation
+
+    sky_diffuse_low = dhi*(T*(1-F) + F*(numer_low/denom_low))
+    sky_diffuse_high = dhi*(T*(1-F) + F*Rb)
+
+    low_elevation_condition = solar_elevation < 0.1
+    sky_diffuse = np.where(low_elevation_condition,
+                           sky_diffuse_low, sky_diffuse_high)
+    if isinstance(sky_diffuse_low, pd.Series):
+        sky_diffuse = pd.Series(sky_diffuse,
+                                index=sky_diffuse_low.index)
+
+    return sky_diffuse
