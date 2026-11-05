@@ -229,7 +229,7 @@ def kellygibson2009_tracking3(tracker_theta,dni,threshold=10):
 
     return tracker_angle_set
 
-def munoz2024_diffuse(tracker_theta_ref,solar_zenith,solar_azimuth, dni, dhi, ghi, albedo, axis_azimuth=180):
+def munoz2024_diffuse(timestamp,tracker_theta_ref,solar_zenith,solar_azimuth, dni, dhi, ghi, albedo, axis_azimuth=180):
     r"""
     Calculate HSAT tracker angle using the CENER diffuse model.
     
@@ -248,6 +248,8 @@ def munoz2024_diffuse(tracker_theta_ref,solar_zenith,solar_azimuth, dni, dhi, gh
 
     Parameters
     ----------
+    timestamp : pandas Datetime
+        Timestamps of the input values.
     tracker_theta_ref : numeric
         Reference tracker rotation angle, [°]
     solar_zenith : numeric
@@ -289,7 +291,7 @@ def munoz2024_diffuse(tracker_theta_ref,solar_zenith,solar_azimuth, dni, dhi, gh
     #Calculate G_poa:
 
     # get extraterrestrial irradiance
-    dni_extra = pvlib.irradiance.get_extra_radiation(solar_zenith)
+    dni_extra = pvlib.irradiance.get_extra_radiation(timestamp)
     # calculate G_poa using Perez model
     poa_components = pvlib.irradiance.get_total_irradiance(surface_orientation['surface_tilt'],surface_orientation['surface_azimuth'],
         solar_zenith,solar_azimuth,dni,ghi,dhi,albedo=albedo,dni_extra=dni_extra,model='perez')
@@ -423,7 +425,7 @@ def Antonanzas2018_model1(tracker_theta_ref,poa,ghi, timestamps,tracker_speed = 
     return tracker_theta
 
 
-def Antonanzas2018_model2(tracker_theta_ref,poa_predicted_hrly,ghi_predicted_hrly):
+def Antonanzas2018_model2(tracker_theta_ref,poa_predicted_hrly,ghi_predicted_hrly,tracker_speed = 18.3,persistence_min = 5):
     r"""
     Calculate tracker angle according to Antonanzas 2018 model 2. 
     Take hourly numerical weather prediction (NWP) of GHI as a 24 hr forecast starting at 00:00 [1]_.
@@ -617,7 +619,7 @@ def decomposition_from_DHIfrac(d,solar_zenith,ghi):
 
     return dhi, dni
 
-def Antonanzas2018_POAcalc(surface_tilt,surface_azimuth,solar_zenith,solar_azimuth,ghi,dhi,dni,albedo=0.24, a_r=0.17):
+def Antonanzas2018_POAcalc(timestamp,surface_tilt,surface_azimuth,solar_zenith,solar_azimuth,ghi,dhi,dni,albedo=0.24, a_r=0.17):
     r"""
     Calculate POA on a tilted plane as described in Antonanzas 2018, section 2.2.
     Q: does this differ from the other approaches and does it matter...?
@@ -625,7 +627,8 @@ def Antonanzas2018_POAcalc(surface_tilt,surface_azimuth,solar_zenith,solar_azimu
 
     1. DNI on poa: G_{direct} = DNI * cos(theta_i) (eq. 12 adapted for DNI)
     2. Reflected irradiance on poa: G_{ground} = GHI * albedo * (1 - cos(beta))/2 (eq. 13)
-    3. Diffuse irradiance on poa: Muneer model
+    3. Diffuse irradiance on poa: Muneer model (1990)
+    4. 
     
     """
 
@@ -635,18 +638,26 @@ def Antonanzas2018_POAcalc(surface_tilt,surface_azimuth,solar_zenith,solar_azimu
 
     #calculate aoi for direct irradiance on tilted plane
     aoi = pvlib.irradiance.aoi(surface_tilt, surface_azimuth, solar_zenith, solar_azimuth)
+    F_b = pvlib.iam.martin_ruiz(aoi) # get direct angular loss factor
+    F_d, F_r = pvlib.iam.martin_ruiz_diffuse(surface_tilt) #get diffuse and reflected loss factors
+
     #get direct irradiance on tilted plane
-    direct_poa = dni * cosd(aoi) 
+    direct_poa = np.maximum(dni * cosd(aoi),0)
+    direct_poa_eff = direct_poa * (1-F_b) #apply angular loss factor
 
     #reflected irradiance on tilted plane
     reflected_poa = ghi * albedo * (1 - cosd(surface_tilt))/2
+    reflected_poa_eff = reflected_poa * (1-F_r) #apply angular loss factor
 
     #apply muneer model for diffuse irradiance on tilted plane
+    dni_extra = pvlib.irradiance.get_extra_radiation(timestamp)
+    diffuse_poa = muneer1990(surface_tilt, surface_azimuth, dhi, ghi, dni_extra, solar_zenith=solar_zenith, solar_azimuth=solar_azimuth)
+    diffuse_poa_eff = diffuse_poa * (1-F_d) #apply angular loss factor
 
-    poa_total = direct_poa + reflected_poa
+    #take sum of 3 irradiance components to get total POA
+    poa_total_eff = direct_poa_eff + reflected_poa_eff + diffuse_poa_eff
 
-
-    return poa_total
+    return poa_total_eff
 
 
 
