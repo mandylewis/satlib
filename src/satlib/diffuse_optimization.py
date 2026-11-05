@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pvlib
 import satlib
-from satlib._trigd import sind, cosd
+from satlib._trigd import sind, cosd, atand
 from satlib.limits import clip_speed
 from pvlib import tools
 
@@ -619,7 +619,13 @@ def decomposition_from_DHIfrac(d,solar_zenith,ghi):
 
     return dhi, dni
 
-def Antonanzas2018_POAcalc(timestamp,surface_tilt,surface_azimuth,solar_zenith,solar_azimuth,ghi,dhi,dni,albedo=0.24, a_r=0.17):
+def muneer_overcast_diffuse(surface_tilt, dhi):
+    """Eq. 14 from Antonanzas 2018"""
+    beta = np.radians(surface_tilt)
+    T = (1 + np.cos(beta)) / 2 + 0.25227 * (np.sin(beta) - beta*np.cos(beta) - np.pi*(np.sin(beta/2)**2))
+    return dhi * T
+
+def Antonanzas2018_POAcalc(timestamp,surface_tilt,surface_azimuth,solar_zenith,solar_azimuth,ghi,dhi,dni,dni_extra,gcr,albedo=0.24, a_r=0.17):
     r"""
     Calculate POA on a tilted plane as described in Antonanzas 2018, section 2.2.
     Q: does this differ from the other approaches and does it matter...?
@@ -627,32 +633,53 @@ def Antonanzas2018_POAcalc(timestamp,surface_tilt,surface_azimuth,solar_zenith,s
 
     1. DNI on poa: G_{direct} = DNI * cos(theta_i) (eq. 12 adapted for DNI)
     2. Reflected irradiance on poa: G_{ground} = GHI * albedo * (1 - cos(beta))/2 (eq. 13)
-    3. Diffuse irradiance on poa: Muneer model (1990)
-    4. 
-    
+    3. Diffuse irradiance on poa: Muneer model (1990)(eq. 14-16, taken from pvlib PR here)
+    4. Apply Martin Ruiz (2001) IAM model to each component (eq. 20-25, taken from pvlib here)
+    5. Total irradiance = G_{poa} = G_{direct} + G_{ground} + G_{sky\,diffuse} (eq. 26)
+
+
+
+
+    a_r = 0.17 given in paper
     """
+    #get clearness index to create "overcast" flag
+    kt = pvlib.irradiance.clearness_index(ghi,solar_zenith,dni_extra)
+    airmass = pvlib.atmosphere.get_relative_airmass(solar_zenith,model='simple') #(eq. 18)
+    kt_prime = pvlib.irradiance.clearness_index_zenith_independent(kt,airmass) # (eq. 17)
+    overcast_ts = (kt_prime < 0.3) & (solar_zenith < 90) #flag of overcast conditions (threshold from Ineichen 2011 via Antonanzas 2018)
 
-    # use described AOI loss approaches in addition to transposition and other eqns
-    #  
-
-
-    #calculate aoi for direct irradiance on tilted plane
+    #calculate aoi losses according to Martin Ruiz (2001) IAM model (eq. 20-25)
     aoi = pvlib.irradiance.aoi(surface_tilt, surface_azimuth, solar_zenith, solar_azimuth)
-    F_b = pvlib.iam.martin_ruiz(aoi) # get direct angular loss factor
-    F_d, F_r = pvlib.iam.martin_ruiz_diffuse(surface_tilt) #get diffuse and reflected loss factors
+    iam_b = pvlib.iam.martin_ruiz(aoi,a_r=a_r) # get direct angular loss factor
+    iam_d, iam_r = pvlib.iam.martin_ruiz_diffuse(surface_tilt,a_r=a_r) #get diffuse and reflected loss factors
 
     #get direct irradiance on tilted plane
-    direct_poa = np.maximum(dni * cosd(aoi),0)
-    direct_poa_eff = direct_poa * (1-F_b) #apply angular loss factor
+    direct_poa = np.maximum(dni * cosd(aoi),0) #eq. 12, modified
+    direct_poa_eff = direct_poa * iam_b # eq. 23
 
     #reflected irradiance on tilted plane
-    reflected_poa = ghi * albedo * (1 - cosd(surface_tilt))/2
-    reflected_poa_eff = reflected_poa * (1-F_r) #apply angular loss factor
+    reflected_poa = ghi * albedo * (1 - cosd(surface_tilt))/2 #eq. 13
+    reflected_poa_eff = reflected_poa * iam_r # eq. 24
 
-    #apply muneer model for diffuse irradiance on tilted plane
-    dni_extra = pvlib.irradiance.get_extra_radiation(timestamp)
-    diffuse_poa = muneer1990(surface_tilt, surface_azimuth, dhi, ghi, dni_extra, solar_zenith=solar_zenith, solar_azimuth=solar_azimuth)
-    diffuse_poa_eff = diffuse_poa * (1-F_d) #apply angular loss factor
+    #apply muneer model for diffuse irradiance on tilted plane eq. 15-16
+    diffuse_sunny = muneer2004(surface_tilt, surface_azimuth, dhi, ghi, dni_extra, solar_zenith=solar_zenith, solar_azimuth=solar_azimuth)
+
+    #if overcast, apply correction for inter table shading (eq. 19)
+    epsilon = atand(gcr*sind(surface_tilt)/(1-gcr*cosd(surface_tilt))) #derived from 2D geometry
+    beta_prime = 180 - epsilon #complementary angle
+
+    # eq. 19 - add some inter table shading to diffuse irradiance, but only when overcast
+    cloudy_diffuse_poa_uncorr = muneer_overcast_diffuse(surface_tilt, dhi)
+    cloudy_diffuse_poa_factor = muneer_overcast_diffuse(beta_prime, dhi) # diffuse irradiance blocked by adjacent rows
+    diffuse_overcast = cloudy_diffuse_poa_uncorr - cloudy_diffuse_poa_factor
+
+    # when kt_prime <0.3, use eq. 14. Otherwise use regular Muneer 2004 (eq. 15-16)
+    diffuse_poa = np.where(overcast_ts, diffuse_overcast, diffuse_sunny)
+
+    # apply direct IAM to diffuse irradiance when it's sunny and diffuse IAM when it's overcast (eq. 25)
+    iam_diffuse = np.where(overcast_ts, iam_d, iam_b) #eq. 25
+
+    diffuse_poa_eff = diffuse_poa * iam_diffuse 
 
     #take sum of 3 irradiance components to get total POA
     poa_total_eff = direct_poa_eff + reflected_poa_eff + diffuse_poa_eff
@@ -668,6 +695,143 @@ https://github.com/pvlib/pvlib-python/pull/2184
 
 written by BernatNicolau.
 """
+
+def muneer2004(surface_tilt, surface_azimuth, dhi, ghi, dni_extra,
+               solar_zenith=None, solar_azimuth=None, projection_ratio=None,
+               location="southern_europe"):
+    '''
+    Determine sky diffuse irradiance on a tilted surface using the
+    Muneer model.
+
+    This Muneer transposition model is originally described in [1]_, and
+    improved for low solar elevations in [2]_.
+
+    Parameters
+    ----------
+    surface_tilt : numeric
+        Surface tilt angles in decimal degrees. ``surface_tilt`` must
+        be >=0 and <=180. The tilt angle is defined as degrees from horizontal
+        (e.g. surface facing up = 0, surface facing horizon = 90)
+
+    surface_azimuth : numeric
+        Surface azimuth angles in decimal degrees. ``surface_azimuth``
+        must be >=0 and <=360. The azimuth convention is defined as degrees
+        east of north (e.g. North = 0, South=180 East = 90, West = 270).
+
+    dhi : numeric
+        Diffuse horizontal irradiance. [W/m^2]
+
+    ghi : numeric
+        Global horizontal irradiance. [W/m^2]
+
+    dni_extra : numeric
+        Extraterrestrial normal irradiance. [W/m^2]
+
+    location : string, default 'northern_europe'
+        A string which selects the desired equation for calculating the second
+        term of T of Muneer model based on location. If location is not
+        provided as an input, the default, 'northern_europe' will be used.
+        All possible location selections are:
+
+        * 'northern_europe'
+        * 'southern_europe'
+        * 'japan'
+        * 'globe'
+
+    solar_zenith : numeric
+        Solar apparent (refraction-corrected) zenith angles in decimal
+        degrees. Must supply ``solar_zenith`` and ``solar_azimuth`` or
+        supply ``projection_ratio``.
+
+    solar_azimuth : numeric
+        Solar azimuth angles in decimal degrees. Must supply
+        ``solar_zenith`` and ``solar_azimuth`` or supply
+        ``projection_ratio``.
+
+    projection_ratio : numeric, optional
+        Ratio of cosine of angle of incidence to cosine of solar zenith
+        angle. [unitless]
+
+    Returns
+    -------
+    poa_sky_diffuse : numeric
+        In-plane diffuse irradiance from the sky. [W/m^2]
+
+    References
+    ----------
+    .. [1] Muneer, T., Gueymard, C., & Kambezidis, H., 2004. Hourly horizontal
+       irradiation and illuminance. 157-158
+       :doi:`10.1016/B978-075065974-1/50011-5`
+
+    .. [2] Gracia, A., & Huld, T., 2013. Performance comparison of different
+       models for the estimation of global irradiance on inclined surfaces:
+       validation of the model implemented in PVGIS. Centro Común de
+       Investigación, Instituto de Energía y Transporte.
+       :doi:`10.2790/91554`
+
+    '''
+    available_locations = ["northern_europe", "southern_europe", "japan",
+                           "globe"]
+    if location not in available_locations:
+        raise ValueError
+    desired_index = available_locations.index(location)
+
+    cos_solar_zenith = tools.cosd(solar_zenith)
+    # if necessary, calculate ratio of titled and horizontal beam irradiance
+    if projection_ratio is None:
+        cos_tt = pvlib.irradiance.aoi_projection(surface_tilt, surface_azimuth,
+                                solar_zenith, solar_azimuth)
+        cos_tt = np.maximum(cos_tt, 0)  # GH 526
+        Rb = cos_tt / np.maximum(cos_solar_zenith, 0.01745)  # GH 432
+    else:
+        Rb = projection_ratio
+
+    F = pvlib.irradiance.clearness_index(
+        ghi - dhi, solar_zenith, dni_extra)
+
+    solar_elevation = np.pi/2 - np.radians(solar_zenith)
+    low_elevation_condition = solar_elevation < 0.1
+
+    aoi_ = pvlib.irradiance.aoi(surface_tilt, surface_azimuth,
+               solar_zenith, solar_azimuth)
+    overcast_condition = aoi_ >= 90
+    F = np.where(overcast_condition, 0, F)
+
+    T_term1 = (1 + tools.cosd(surface_tilt)) * 0.5
+
+    # term 2 depending on the selected location
+    T_term2_model0 = 0.00333 - 0.415 * F - 0.6987 * F ** 2
+    T_term2_model1 = 0.00263 - 0.712 * F - 0.6883 * F ** 2
+    T_term2_model2 = 0.08000 - 1.050 * F - 2.8400 * F ** 2
+    T_term2_model3 = 0.04000 - 0.820 * F - 2.0260 * F ** 2
+    T_term2 = np.array([T_term2_model0, T_term2_model1,
+                       T_term2_model2, T_term2_model3])
+    T_term2 = T_term2[desired_index]
+    T_term2 = np.where(overcast_condition, 0.25227, T_term2)
+
+    T_term3 = (
+        tools.sind(surface_tilt)
+        - np.radians(surface_tilt) * tools.cosd(surface_tilt)
+        - np.pi * (1 - tools.cosd(surface_tilt)) * 0.5
+    )
+
+    T = T_term1 + T_term2 * T_term3
+
+    numer_low = tools.sind(surface_tilt) * \
+        tools.cosd(surface_azimuth - solar_azimuth)
+    denom_low = 0.1 - 0.008 * solar_elevation
+
+    sky_diffuse_low = dhi*(T*(1-F) + F*(numer_low/denom_low))
+    sky_diffuse_high = dhi*(T*(1-F) + F*Rb)
+
+    sky_diffuse = np.where(low_elevation_condition,
+                           sky_diffuse_low, sky_diffuse_high)
+    if isinstance(ghi, pd.Series):
+        sky_diffuse = pd.Series(sky_diffuse,
+                                index=ghi.index)
+    return sky_diffuse
+
+
 
 def muneer1990(surface_tilt, surface_azimuth, dhi, ghi, dni_extra, b=5.73,
             solar_zenith=None, solar_azimuth=None, projection_ratio=None):
