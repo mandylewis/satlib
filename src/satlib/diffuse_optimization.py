@@ -620,16 +620,46 @@ def decomposition_from_DHIfrac(d,solar_zenith,ghi):
     return dhi, dni
 
 def muneer_overcast_diffuse(surface_tilt, dhi):
-    """Eq. 14 from Antonanzas 2018"""
+    r"""
+    Calculate diffuse irradiance POA component for overcast conditions from
+    eq. 14 of Antonanzas (2018).
+    
+    Parameters
+    ----------
+    surface_tilt : numeric
+        Surface tilt. [°]
+    dhi : numeric
+        Diffuse horizontal irradiance. [W/m^2]
+
+    Returns
+    -------
+    poa_diffuse : numeric
+        Diffuse irradiance on the tilted surface. [W/m^2]
+        
+    References
+    ----------
+    .. [1] J. Antonanzas, R. Urraca, F. J. Martinez-de-Pison, and F. Antonanzas, 
+    “Optimal solar tracking strategy to increase irradiance in the plane of 
+    array under cloudy conditions: A study across Europe,” Sol. Energy, 
+    vol. 163, pp. 122-130, Mar. 2018, 
+    doi: 10.1016/j.solener.2018.01.080.
+    
+    """
+
+
     beta = np.radians(surface_tilt)
     T = (1 + np.cos(beta)) / 2 + 0.25227 * (np.sin(beta) - beta*np.cos(beta) - np.pi*(np.sin(beta/2)**2))
-    return dhi * T
+    poa_diffuse = dhi * T
 
-def Antonanzas2018_POAcalc(timestamp,surface_tilt,surface_azimuth,solar_zenith,solar_azimuth,ghi,dhi,dni,dni_extra,gcr,albedo=0.24, a_r=0.17):
+    return poa_diffuse
+
+def Antonanzas2018_POAcalc(surface_tilt,surface_azimuth,solar_zenith,solar_azimuth,ghi,dhi,dni,dni_extra,gcr,albedo=0.24, a_r=0.17):
     r"""
-    Calculate POA on a tilted plane as described in Antonanzas 2018, section 2.2.
-    Q: does this differ from the other approaches and does it matter...?
+    Calculate effective POA on a tilted plane as described in Antonanzas 2018, section 2.
 
+    Calculate direct, ground-reflected, and diffuse irradiance components on a tilted plane.
+    Apply angle of incidence losses on each component separately.
+    Sum the three effective irradiance components for total effective POA.
 
     1. DNI on poa: G_{direct} = DNI * cos(theta_i) (eq. 12 adapted for DNI)
     2. Reflected irradiance on poa: G_{ground} = GHI * albedo * (1 - cos(beta))/2 (eq. 13)
@@ -638,9 +668,44 @@ def Antonanzas2018_POAcalc(timestamp,surface_tilt,surface_azimuth,solar_zenith,s
     5. Total irradiance = G_{poa} = G_{direct} + G_{ground} + G_{sky\,diffuse} (eq. 26)
 
 
+    Parameters
+    ----------
+    surface_tilt : numeric
+        Surface tilt from horizontal. [°]
+    surface_azimuth : numeric
+        Surface azimuth, degrees east of north. [°]
+    solar_zenith : numeric
+        Solar zenith angle. [°]
+    solar_azimuth : numeric
+        Solar azimuth angle, degrees east of north. [°]
+    ghi : numeric
+        Global horizontal irradiance. [W/m^2]
+    dhi : numeric
+        Diffuse horizontal irradiance. [W/m^2]
+    dni : numeric
+        Direct normal irradiance. [W/m^2]
+    dni_extra : numeric
+        Extraterrestrial normal irradiance. [W/m^2]
+    gcr : float
+        Ground coverage ratio. [unitless]
+    albedo : float, default 0.24
+        Ground albedo. [1] uses 0.24 for grass and 0.8 for snow cover. [unitless]
+    a_r : float, default 0.17
+        Angular loss coefficient of the Martin and Ruiz model, default taken from [1]. [unitless]
 
+    Returns
+    -------
+    poa_total_eff : numeric
+        Effective plane-of-array irradiance after AOI losses. [W/m^2]
 
-    a_r = 0.17 given in paper
+    References
+    ----------
+    .. [1] J. Antonanzas, R. Urraca, F. J. Martinez-de-Pison, and F. Antonanzas, 
+        “Optimal solar tracking strategy to increase irradiance in the plane of 
+        array under cloudy conditions: A study across Europe,” Sol. Energy, 
+        vol. 163, pp. 122-130, Mar. 2018, doi: 10.1016/j.solener.2018.01.080.
+        [2] textbook that gave muneer 2004
+
     """
     #get clearness index to create "overcast" flag
     kt = pvlib.irradiance.clearness_index(ghi,solar_zenith,dni_extra)
