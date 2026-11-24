@@ -621,6 +621,49 @@ def decomposition_from_DHIfrac(d,solar_zenith,ghi):
 
     return dhi, dni
 
+def effective_ghi(ghi, dhi, dni, solar_zenith, dni_extra, a_r=0.17):
+    r"""
+    Find effective GHI (after IAM losses).
+
+    Parameters
+    ----------
+    ghi : numeric
+        Global horizontal irradiance. [W/m^2]
+    dhi : numeric
+        Diffuse horizontal irradiance. [W/m^2]
+    dni : numeric
+        Direct normal irradiance. [W/m^2]
+    solar_zenith : Series
+        Solar zenith angle. [degrees]
+    dni_extra : numeric
+        Extraterrestrial normal irradiance. [W/m^2]
+    a_r : float, default 0.17
+        Angular loss coefficient of the Martin and Ruiz model, default taken from [1]. [unitless]
+
+    Returns
+    -------
+    ghi_eff : Series
+        Effective global horizontal irradiance after angle-of-incidence losses. [W/m^2]
+
+    """
+    # check for overcast conditions (diffuse IAM only applied when overcast)
+    kt = pvlib.irradiance.clearness_index(ghi, solar_zenith, dni_extra)
+    am = pvlib.atmosphere.get_relative_airmass(solar_zenith, model='simple')
+    kt_prime = pvlib.irradiance.clearness_index_zenith_independent(kt, am)
+    overcast = (kt_prime < 0.3) & (solar_zenith < 90)
+
+    # find IAM for direct (beam) and diffuse irradiance
+    iam_b = pvlib.iam.martin_ruiz(solar_zenith, a_r=a_r)            
+    iam_d = pvlib.iam.martin_ruiz_diffuse(0.0, a_r=a_r)[0]          
+
+    # derate direct and diffuse irradiance by the IAM
+    direct_eff = np.maximum(dni * cosd(solar_zenith), 0) * iam_b
+    diffuse_eff = dhi * np.where(overcast, iam_d, iam_b)
+    ghi_eff = direct_eff + diffuse_eff
+
+    #return effective GHI
+    return ghi_eff
+
 def muneer_overcast_diffuse(surface_tilt, dhi):
     r"""
     Calculate diffuse irradiance POA component for overcast conditions from
