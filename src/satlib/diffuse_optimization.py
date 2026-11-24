@@ -82,6 +82,121 @@ def munoz2024_analytical(solar_zenith, solar_azimuth, dni, dhi, ghi, albedo,axis
 
     return np.degrees(beta_opt)
 
+def munoz2024_diffuse(timestamp,tracker_theta_ref,solar_zenith,solar_azimuth, dni, dhi, ghi, albedo, axis_azimuth=180):
+    r"""
+    Calculate HSAT tracker angle using the CENER diffuse model.
+    
+    See section 2.1.1 of [1]_.
+
+    When GHI > POA, ``tracker_theta = 0``
+
+    When GHI < POA, ``tracker_theta = tracker_theta_ref`` 
+
+    To calculate POA at the reference tracker angle:
+    ``G_{poa} = G_{sky\,diffuse} + G_{direct} + G_{ground}``
+
+    Find diffuse irradiance contribution from Perez model.
+
+    Find ground-reflected irradiance assuming Lambertian ground reflection.
+
+    Parameters
+    ----------
+    timestamp : pandas Datetime
+        Timestamps of the input values.
+    tracker_theta_ref : numeric
+        Reference tracker rotation angle, [°]
+    solar_zenith : numeric
+        Solar zenith angle. [°]
+    solar_azimuth : numeric
+        Solar azimuth angle. [°]
+    dni : numeric
+        Direct normal irradiance. [W/m^2]
+    dhi : numeric
+        Diffuse horizontal irradiance. [W/m^2]
+    ghi : numeric
+        Global horizontal irradiance. [W/m^2]
+    albedo : numeric
+        Ground albedo. [unitless]
+    axis_azimuth : float, default 180
+        Compass direction along which the tracker axis is oriented.
+        Clockwise from north. [°]
+
+    Returns
+    -------
+    tracker_theta : numeric
+        New tracker rotation angle. [°]
+
+    References
+    ----------
+    .. [1] I. Muñoz, A. Guinda, G. Olivares, S. Díaz, A. M. Gracia-Amillo, and
+       L. Casajús, "Evaluation of Horizontal Single-Axis Solar Tracker
+       Algorithms in Terms of Energy Production and Operational Performance,"
+       Solar RRL, vol. 8, no. 1, p. 2300507, 2024.
+       :doi:`10.1002/solr.202300507`
+    """
+
+    #Compare G_poa with GHI. If GHI > G_poa, set tracker angle to 0 (flat). If GHI < G_poa, set tracker angle to reference tracking angle.
+    
+    # get surface orientation
+    surface_orientation = pvlib.tracking.calc_surface_orientation(tracker_theta_ref, axis_tilt = 0, axis_azimuth=axis_azimuth)
+
+
+    #Calculate G_poa:
+
+    # get extraterrestrial irradiance
+    dni_extra = pvlib.irradiance.get_extra_radiation(timestamp)
+    # calculate G_poa using Perez model
+    poa_components = pvlib.irradiance.get_total_irradiance(surface_orientation['surface_tilt'],surface_orientation['surface_azimuth'],
+        solar_zenith,solar_azimuth,dni,ghi,dhi,albedo=albedo,dni_extra=dni_extra,model='perez')
+    
+    poa_total = poa_components['poa_global']
+
+    # get Munoz2024 diffuse tracker angle from reference tracking angle and GHI vs GPOA comparison 
+    tracker_theta = munoz2024_diffusetrackerangle(tracker_theta_ref,poa_total,ghi)
+
+    return tracker_theta
+
+def munoz2024_diffusetrackerangle(tracker_theta_ref,POA,GHI):
+    r"""
+    Calculate tracker angle according to CENER diffuse algorithm.
+     
+    See section 2.1.1 of [1]_.
+
+    Set the tracker to 0° when GHI > POA.
+    Otherwise, set the tracker to the reference tracking angle.
+  
+    Parameters
+    ----------
+    tracker_theta_ref : numeric
+        Reference tracker rotation angle. [°]
+    POA : numeric
+        Plane-of-array irradiance at the reference tracker angle. [W/m^2]
+    GHI : numeric
+        Global horizontal irradiance. [W/m^2]
+ 
+    Returns
+    -------
+    tracker_theta : numeric
+        New tracker rotation angle. [°]
+ 
+    References
+    ----------
+    .. [1] I. Muñoz, A. Guinda, G. Olivares, S. Díaz, A. M. Gracia-Amillo, and
+       L. Casajús, "Evaluation of Horizontal Single-Axis Solar Tracker
+       Algorithms in Terms of Energy Production and Operational Performance,"
+       Solar RRL, vol. 8, no. 1, p. 2300507, 2024.
+       :doi:`10.1002/solr.202300507`
+    """
+
+    # Find timestamps where GHI > GPOA
+    flat_tracking_flag = GHI > POA
+
+    # take the reference tracking angle if GHI < GPOA, and 0 if GHI > GPOA
+    tracker_theta = np.where(flat_tracking_flag, 0, tracker_theta_ref)
+
+    return tracker_theta
+
+
 def kellygibson2009_tracking1(tracker_theta,ghi, ghi_clear,threshold=0.3):
     """
     Implement the "enhanced tracking system number 1" from Kelly & Gibson (2009).
@@ -228,120 +343,6 @@ def kellygibson2009_tracking3(tracker_theta,dni,threshold=10):
     tracker_angle_set = np.where(flat_tracking_flag, 0, tracker_theta)
 
     return tracker_angle_set
-
-def munoz2024_diffuse(timestamp,tracker_theta_ref,solar_zenith,solar_azimuth, dni, dhi, ghi, albedo, axis_azimuth=180):
-    r"""
-    Calculate HSAT tracker angle using the CENER diffuse model.
-    
-    See section 2.1.1 of [1]_.
-
-    When GHI > POA, ``tracker_theta = 0``
-
-    When GHI < POA, ``tracker_theta = tracker_theta_ref`` 
-
-    To calculate POA at the reference tracker angle:
-    ``G_{poa} = G_{sky\,diffuse} + G_{direct} + G_{ground}``
-
-    Find diffuse irradiance contribution from Perez model.
-
-    Find ground-reflected irradiance assuming Lambertian ground reflection.
-
-    Parameters
-    ----------
-    timestamp : pandas Datetime
-        Timestamps of the input values.
-    tracker_theta_ref : numeric
-        Reference tracker rotation angle, [°]
-    solar_zenith : numeric
-        Solar zenith angle. [°]
-    solar_azimuth : numeric
-        Solar azimuth angle. [°]
-    dni : numeric
-        Direct normal irradiance. [W/m^2]
-    dhi : numeric
-        Diffuse horizontal irradiance. [W/m^2]
-    ghi : numeric
-        Global horizontal irradiance. [W/m^2]
-    albedo : numeric
-        Ground albedo. [unitless]
-    axis_azimuth : float, default 180
-        Compass direction along which the tracker axis is oriented.
-        Clockwise from north. [°]
-
-    Returns
-    -------
-    tracker_theta : numeric
-        New tracker rotation angle. [°]
-
-    References
-    ----------
-    .. [1] I. Muñoz, A. Guinda, G. Olivares, S. Díaz, A. M. Gracia-Amillo, and
-       L. Casajús, "Evaluation of Horizontal Single-Axis Solar Tracker
-       Algorithms in Terms of Energy Production and Operational Performance,"
-       Solar RRL, vol. 8, no. 1, p. 2300507, 2024.
-       :doi:`10.1002/solr.202300507`
-    """
-
-    #Compare G_poa with GHI. If GHI > G_poa, set tracker angle to 0 (flat). If GHI < G_poa, set tracker angle to reference tracking angle.
-    
-    # get surface orientation
-    surface_orientation = pvlib.tracking.calc_surface_orientation(tracker_theta_ref, axis_tilt = 0, axis_azimuth=axis_azimuth)
-
-
-    #Calculate G_poa:
-
-    # get extraterrestrial irradiance
-    dni_extra = pvlib.irradiance.get_extra_radiation(timestamp)
-    # calculate G_poa using Perez model
-    poa_components = pvlib.irradiance.get_total_irradiance(surface_orientation['surface_tilt'],surface_orientation['surface_azimuth'],
-        solar_zenith,solar_azimuth,dni,ghi,dhi,albedo=albedo,dni_extra=dni_extra,model='perez')
-    
-    poa_total = poa_components['poa_global']
-
-    # get Munoz2024 diffuse tracker angle from reference tracking angle and GHI vs GPOA comparison 
-    tracker_theta = munoz2024_diffusetrackerangle(tracker_theta_ref,poa_total,ghi)
-
-    return tracker_theta
-
-def munoz2024_diffusetrackerangle(tracker_theta_ref,POA,GHI):
-    r"""
-    Calculate tracker angle according to CENER diffuse algorithm.
-     
-    See section 2.1.1 of [1]_.
-
-    Set the tracker to 0° when GHI > POA.
-    Otherwise, set the tracker to the reference tracking angle.
-  
-    Parameters
-    ----------
-    tracker_theta_ref : numeric
-        Reference tracker rotation angle. [°]
-    POA : numeric
-        Plane-of-array irradiance at the reference tracker angle. [W/m^2]
-    GHI : numeric
-        Global horizontal irradiance. [W/m^2]
- 
-    Returns
-    -------
-    tracker_theta : numeric
-        New tracker rotation angle. [°]
- 
-    References
-    ----------
-    .. [1] I. Muñoz, A. Guinda, G. Olivares, S. Díaz, A. M. Gracia-Amillo, and
-       L. Casajús, "Evaluation of Horizontal Single-Axis Solar Tracker
-       Algorithms in Terms of Energy Production and Operational Performance,"
-       Solar RRL, vol. 8, no. 1, p. 2300507, 2024.
-       :doi:`10.1002/solr.202300507`
-    """
-
-    # Find timestamps where GHI > GPOA
-    flat_tracking_flag = GHI > POA
-
-    # take the reference tracking angle if GHI < GPOA, and 0 if GHI > GPOA
-    tracker_theta = np.where(flat_tracking_flag, 0, tracker_theta_ref)
-
-    return tracker_theta
 
 def Antonanzas2018_model1(tracker_theta_ref,poa,ghi, timestamps,tracker_speed = 18.3,persistence_min = 5):
     r"""
@@ -500,7 +501,7 @@ def BRL_model_2010(timestamps,ghi,ghi_extra,ast,solar_zenith,model='generic'):
     ghi : pd.Series
         Global horizontal irradiance. [W/m^2]
     ghi_extra : pd.Series
-        Extraterrestrial irradiance. [W/m^2]
+        Extraterrestrial irradiance. [W/m^2] (consider taking dni_extra and doing the conversion here)
     ast : pd.Series
         Apparent solar time. [hours]
     solar_zenith : pd.Series
@@ -646,7 +647,6 @@ def muneer_overcast_diffuse(surface_tilt, dhi):
     
     """
 
-
     beta = np.radians(surface_tilt)
     T = (1 + np.cos(beta)) / 2 + 0.25227 * (np.sin(beta) - beta*np.cos(beta) - np.pi*(np.sin(beta/2)**2))
     poa_diffuse = dhi * T
@@ -716,7 +716,8 @@ def Antonanzas2018_POAcalc(surface_tilt,surface_azimuth,solar_zenith,solar_azimu
     #calculate aoi losses according to Martin Ruiz (2001) IAM model (eq. 20-25)
     aoi = pvlib.irradiance.aoi(surface_tilt, surface_azimuth, solar_zenith, solar_azimuth)
     iam_b = pvlib.iam.martin_ruiz(aoi,a_r=a_r) # get direct angular loss factor
-    iam_d, iam_r = pvlib.iam.martin_ruiz_diffuse(surface_tilt,a_r=a_r) #get diffuse and reflected loss factors
+    iam_diffuse_out = pvlib.iam.martin_ruiz_diffuse(surface_tilt,a_r=a_r) #get diffuse and reflected loss factors
+    iam_d, iam_r = iam_diffuse_out['sky'], iam_diffuse_out['ground']
 
     #get direct irradiance on tilted plane
     direct_poa = np.maximum(dni * cosd(aoi),0) #eq. 12, modified
@@ -894,115 +895,4 @@ def muneer2004(surface_tilt, surface_azimuth, dhi, ghi, dni_extra,
     if isinstance(ghi, pd.Series):
         sky_diffuse = pd.Series(sky_diffuse,
                                 index=ghi.index)
-    return sky_diffuse
-
-
-
-def muneer1990(surface_tilt, surface_azimuth, dhi, ghi, dni_extra, b=5.73,
-            solar_zenith=None, solar_azimuth=None, projection_ratio=None):
-    r"""
-    Determine sky diffuse irradiance on a tilted surface using the
-    Muneer model.
-
-    This Muneer transposition model is described in [1]_.
-
-    Parameters
-    ----------
-    surface_tilt : numeric
-        Surface tilt angles in decimal degrees. ``surface_tilt`` must
-        be >=0 and <=180. The tilt angle is defined as degrees from horizontal
-        (e.g. surface facing up = 0, surface facing horizon = 90)
-
-    surface_azimuth : numeric
-        Surface azimuth angles in decimal degrees. ``surface_azimuth``
-        must be >=0 and <=360. The azimuth convention is defined as degrees
-        east of north (e.g. North = 0, South=180 East = 90, West = 270).
-
-    dhi : numeric
-        Diffuse horizontal irradiance. [W/m^2]Expand commentComment on line R1030Resolved
-
-    ghi : numeric
-        Global horizontal irradiance. [W/m^2]
-
-    dni_extra : numeric
-        Extraterrestrial normal irradiance. [W/m^2]
-
-    b : numeric, default 5.73
-        Radiance distribution index, introduced by Moon and Spencer [2]_
-        to model luminance distribution of overcast sky. [unitless]
-        Recommended values from [1]_:
-
-           - isotropic: b = 0
-           - shaded surface: b = 5.73 (default)
-           - sunlit surface, overcast sky: b = 1.68
-           - sunlit surface, non-overcast sky: b = -0.62
-
-    solar_zenith : numeric
-        Solar apparent (refraction-corrected) zenith angles in decimal
-        degrees. Must supply ``solar_zenith`` and ``solar_azimuth`` or
-        supply ``projection_ratio``.
-
-    solar_azimuth : numeric
-        Solar azimuth angles in decimal degrees. Must supply
-        ``solar_zenith`` and ``solar_azimuth`` or supply
-        ``projection_ratio``.
-
-    projection_ratio : numeric, optional
-        Ratio of cosine of angle of incidence to cosine of solar zenith
-        angle. [unitless]
-
-            Returns
-    -------
-    poa_sky_diffuse : numeric
-        In-plane diffuse irradiance from the sky. [W/m^2]Expand commentComment on line R1065Resolved
-
-    References
-    ----------
-    .. [1] Muneer, T., 1990. Solar radiation model for Europe. Building
-       Services Engineering Research and Technology 11, 153-163.
-       :doi:`10.1177/014362449001100405`
-
-    .. [2] Moon, P., and Spencer, D. E., 1942. Illumination from a
-       non-uniform sky.
-       Trans. Illum. Eng. Soc. (London) 37, 707-725.
-    """
-
-    cos_solar_zenith = tools.cosd(solar_zenith)
-    # if necessary, calculate ratio of titled and horizontal beam irradiance
-    if projection_ratio is None:
-        cos_tt = pvlib.irradiance.aoi_projection(surface_tilt, surface_azimuth,
-                                solar_zenith, solar_azimuth)
-        cos_tt = np.maximum(cos_tt, 0)  # GH 526
-        Rb = cos_tt / np.maximum(cos_solar_zenith, 0.01745)  # GH 432
-    else:
-        Rb = projection_ratio
-
-    T_term1 = (1 + tools.cosd(surface_tilt)) * 0.5
-    T_term2 = 2 * b / (np.pi * (3 + 2 * b))
-    T_term3 = (
-        tools.sind(surface_tilt)
-        - np.radians(surface_tilt) * tools.cosd(surface_tilt)
-        - np.pi * (1 - tools.cosd(surface_tilt)) * 0.5
-    )
-    T = T_term1 + T_term2 * T_term3
-
-    F = pvlib.irradiance.clearness_index(
-        ghi - dhi, solar_zenith, dni_extra)
-
-    solar_elevation = np.pi/2 - np.radians(solar_zenith)
-
-    numer_low = tools.sind(surface_tilt) * \
-        tools.cosd(surface_azimuth - solar_azimuth)
-    denom_low = 0.1 - 0.008 * solar_elevation
-
-    sky_diffuse_low = dhi*(T*(1-F) + F*(numer_low/denom_low))
-    sky_diffuse_high = dhi*(T*(1-F) + F*Rb)
-
-    low_elevation_condition = solar_elevation < 0.1
-    sky_diffuse = np.where(low_elevation_condition,
-                           sky_diffuse_low, sky_diffuse_high)
-    if isinstance(sky_diffuse_low, pd.Series):
-        sky_diffuse = pd.Series(sky_diffuse,
-                                index=sky_diffuse_low.index)
-
     return sky_diffuse
