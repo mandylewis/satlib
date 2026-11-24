@@ -426,37 +426,45 @@ def Antonanzas2018_model1(tracker_theta_ref,poa,ghi, timestamps,tracker_speed = 
     return tracker_theta
 
 
-def Antonanzas2018_model2(tracker_theta_ref,poa_predicted_hrly,ghi_predicted_hrly,tracker_speed = 18.3,persistence_min = 5):
+def Antonanzas2018_model2(tracker_theta_ref,ghi_predicted_hrly,lat,lon,gcr=0.4,albedo=0.2,axis_azimuth=180,tracker_speed = None,persistence_min = 5):
     r"""
     Calculate tracker angle according to Antonanzas 2018 model 2. 
     Take hourly numerical weather prediction (NWP) of GHI as a 24 hr forecast starting at 00:00 [1]_.
 
-    Estimate DHI from BRL model as in [2]_, then get DNI from closure equation.
-
-    Calculate expected POA and compare with expected GHI.
-    When predicted GHI > predicted POA for the coming hour, stow tracker horizontally for that hour.
-    When predicted POA <= predicted GHI for the coming hour, track normally.
-
-    Q: forecast data: right- left- center-label? all 3 (tracker ref, poa, ghi) should follow same convention
-
-    
+    1. Shift forecast index from left-label to center-label
+    2. Estimate DHI from BRL model as in [2]_, then get DNI from closure equation.
+    3. Calculate POA using method defined in [1]_.
+    4. Calculate effective GHI.
+    5. Find hours where module should stow flat.
+        - When predicted GHI > predicted POA for the coming hour, stow tracker horizontally for that hour.
+        - When predicted POA >= predicted GHI for the coming hour, track normally.
+    6. Apply flat timestamps to input tracker angles and return new tracker angles.
+   
     Parameters
     ----------
-    tracker_theta_ref : numeric
-        Reference tracker rotation angle. [°]
-    poa_predicted_hrly : numeric
-        Predicted hourly plane-of-array irradiance at the reference tracker angle. [W/m^2]
-    ghi_predicted_hrly : numeric
-        Predicted hourly global horizontal irradiance. [W/m^2]
-    tracker_speed: float, default 18.3
+    tracker_theta_ref : Series
+        Center-label reference tracker rotation angle with hourly or sub-hourly DatetimeIndex. [°]
+    ghi_predicted_hrly : Series
+        LEFT-LABEL predicted hourly global horizontal irradiance with hourly DatetimeIndex. [W/m^2] 
+    lat : float
+        Site latitude. [°]
+    lon : float
+        Site longitude. [°]
+    gcr : float
+        Ground coverage ratio. [unitless]
+    albedo : numeric
+        Ground albedo. [unitless]
+    axis_azimuth : float, default 180
+        Compass direction along which the tracker axis is oriented.
+        Clockwise from north. [°]
+    tracker_speed: float or None, default None
         Maximum tracker speed in degrees per minute. [°/min]
-    persistence_min: float, default 5
-        Time in minutes to hold a condition before changing set angle
 
     Returns
     -------
-    tracker_theta : numeric
-        New tracker rotation angle. [°]
+    tracker_theta : Series
+        New tracker rotation angle, with the same index as
+        ``tracker_theta_ref``. [°]
     
     References
     ----------
@@ -465,16 +473,49 @@ def Antonanzas2018_model2(tracker_theta_ref,poa_predicted_hrly,ghi_predicted_hrl
         array under cloudy conditions: A study across Europe,” Sol. Energy, vol. 
         163, pp. 122-130, Mar. 2018,
         :doi: `10.1016/j.solener.2018.01.080.`
+    .. [2] B. Ridley, J. Boland, and P. Lauret, “Modelling of diffuse solar fraction 
+        with multiple predictors,” Renew. Energy, vol. 35, no. 2, pp. 478-483, Feb. 2010.
+        :doi: `10.1016/j.renene.2009.07.018`
     """
+    #center-label the predicted GHI (shift timestamps)
+    ghi_predicted_hrly.index = ghi_predicted_hrly.index + pd.Timedelta('30min')
 
-    # stow module horizontally when predicted GHI > predicted POA for the coming hour
-    flat_tracking_flag = ghi_predicted_hrly > poa_predicted_hrly
+    # get hourly tilt angle 
+    hourly_solarpos = pvlib.solarposition.get_solarposition(ghi_predicted_hrly.index, lat, lon)
+    hourly_zenith   = hourly_solarpos['zenith']
+    hourly_theta    = (tracker_theta_ref.reindex(tracker_theta_ref.index.union(ghi_predicted_hrly.index)).interpolate(method='time', limit_area='inside').reindex(ghi_predicted_hrly.index))
+    hourly_tilt = pvlib.tracking.calc_surface_orientation(hourly_theta, axis_tilt=0, axis_azimuth=axis_azimuth)
 
-    # when the flat_tracking_flag is true, set tracker angle to zero. 
-    tracker_theta = np.where(flat_tracking_flag, 0.0, tracker_theta_ref)
+    #calculate hourly extraterrestrial GHI
+    dni_extra_hrly = pvlib.irradiance.get_extra_radiation(ghi_predicted_hrly.index)
+    ghi_extra_hrly = (dni_extra_hrly * cosd(hourly_zenith)).clip(lower=0)
 
+    #use BRL model to decompose GHI into DHI, DNI
+    eqn_of_time = pvlib.solarposition.equation_of_time_spencer71(ghi_predicted_hrly.index.dayofyear)
+    ast = apparentsolartime(ghi_predicted_hrly.index, lon, eqn_of_time)
+    diffuse_frac = BRL_model_2010(ghi_predicted_hrly.index, ghi_predicted_hrly, ghi_extra_hrly, ast, hourly_zenith)
+    forecast_dhi, forecast_dni = decomposition_from_DHIfrac(diffuse_frac, hourly_zenith, ghi_predicted_hrly)
 
-    # Q: how to then take and test against "real" data, what is the best approach?
+    #calculate hourly POA
+    poa_predicted_hrly = Antonanzas2018_POAcalc(
+        hourly_tilt['surface_tilt'], hourly_tilt['surface_azimuth'],
+        hourly_zenith, hourly_solarpos['azimuth'],
+        ghi_predicted_hrly, forecast_dhi, forecast_dni, dni_extra_hrly, gcr, albedo=albedo)
+    
+    #calculate effective GHI (after IAM losses)
+    ghi_eff_forecast = effective_ghi(ghi_predicted_hrly, forecast_dhi, forecast_dni, hourly_zenith, dni_extra_hrly)
+    
+    #find hours where tracker should stow flat
+    hourly_flat_flag = np.where(ghi_eff_forecast > poa_predicted_hrly, 1, 0)
+    hourly_flag_series = pd.Series(hourly_flat_flag, index=ghi_predicted_hrly.index - pd.Timedelta('30min'))
+    
+    #reindex flat periods to timeseries of module tilt angle
+    reindexed_flat_flag = hourly_flag_series.reindex(tracker_theta_ref.index, method='ffill').fillna(0).astype(bool)
+    tracker_theta = pd.Series(np.where(reindexed_flat_flag, 0.0, tracker_theta_ref),index=tracker_theta_ref.index)
+    
+    #add tracker speed limit
+    if tracker_speed is not None:
+        tracker_theta = clip_speed(tracker_theta, tracker_speed, how='lag')
 
     return tracker_theta
 
@@ -653,8 +694,8 @@ def effective_ghi(ghi, dhi, dni, solar_zenith, dni_extra, a_r=0.17):
     overcast = (kt_prime < 0.3) & (solar_zenith < 90)
 
     # find IAM for direct (beam) and diffuse irradiance
-    iam_b = pvlib.iam.martin_ruiz(solar_zenith, a_r=a_r)            
-    iam_d = pvlib.iam.martin_ruiz_diffuse(0.0, a_r=a_r)[0]          
+    iam_b = pvlib.iam.martin_ruiz(solar_zenith, a_r=a_r)
+    iam_d = pvlib.iam.martin_ruiz_diffuse(0.0, a_r=a_r)['sky']      
 
     # derate direct and diffuse irradiance by the IAM
     direct_eff = np.maximum(dni * cosd(solar_zenith), 0) * iam_b
