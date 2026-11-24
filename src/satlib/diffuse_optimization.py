@@ -533,8 +533,9 @@ def BRL_model_2010(timestamps,ghi,ghi_extra,ast,solar_zenith,model='generic'):
 
     #group data by day and get daily Kt
     dates = timestamps.normalize() #get list of dates
-    daily_ghi = ghi.groupby(dates).transform('sum')         #sum of ghi for the day
-    daily_h0 = ghi_extra.groupby(dates).transform('sum')    #sum of extraterrestrial irradiance for the day
+    daytime = ghi_extra > 0
+    daily_ghi = ghi.where(daytime, 0.0).groupby(dates).transform('sum')         #sum of ghi for the day
+    daily_h0 = ghi_extra.where(daytime, 0.0).groupby(dates).transform('sum')    #sum of extraterrestrial irradiance for the day
     daily_kt = (daily_ghi / daily_h0).where(daily_h0 > 0)         #ratio of daily GHI to daily extraterrestrial irradiance, K_t
 
 
