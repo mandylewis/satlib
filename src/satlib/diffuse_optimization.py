@@ -426,7 +426,7 @@ def Antonanzas2018_model1(tracker_theta_ref,poa,ghi, timestamps,tracker_speed = 
     return tracker_theta
 
 
-def Antonanzas2018_model2(tracker_theta_ref,ghi_predicted_hrly,lat,lon,gcr=0.4,albedo=0.2,axis_azimuth=180,tracker_speed = None,persistence_min = 5):
+def Antonanzas2018_model2(tracker_theta_ref,ghi_predicted_hrly,lat,lon,gcr,albedo=0.2,axis_azimuth=180,tracker_speed = None,persistence_min = 5):
     r"""
     Calculate tracker angle according to Antonanzas 2018 model 2. 
     Take hourly numerical weather prediction (NWP) of GHI as a 24 hr forecast starting at 00:00 [1]_.
@@ -478,22 +478,22 @@ def Antonanzas2018_model2(tracker_theta_ref,ghi_predicted_hrly,lat,lon,gcr=0.4,a
         :doi: `10.1016/j.renene.2009.07.018`
     """
     #center-label the predicted GHI (shift timestamps)
-    ghi_predicted_hrly.index = ghi_predicted_hrly.index + pd.Timedelta('30min')
+    ghi_predicted_hrly_ts_center = ghi_predicted_hrly.index + pd.Timedelta('30min')
 
     # get hourly tilt angle 
-    hourly_solarpos = pvlib.solarposition.get_solarposition(ghi_predicted_hrly.index, lat, lon)
+    hourly_solarpos = pvlib.solarposition.get_solarposition(ghi_predicted_hrly_ts_center, lat, lon)
     hourly_zenith   = hourly_solarpos['zenith']
-    hourly_theta    = (tracker_theta_ref.reindex(tracker_theta_ref.index.union(ghi_predicted_hrly.index)).interpolate(method='time', limit_area='inside').reindex(ghi_predicted_hrly.index))
+    hourly_theta    = (tracker_theta_ref.reindex(ghi_predicted_hrly_ts_center.union(ghi_predicted_hrly_ts_center)).interpolate(method='time', limit_area='inside').reindex(ghi_predicted_hrly_ts_center))
     hourly_tilt = pvlib.tracking.calc_surface_orientation(hourly_theta, axis_tilt=0, axis_azimuth=axis_azimuth)
 
     #calculate hourly extraterrestrial GHI
-    dni_extra_hrly = pvlib.irradiance.get_extra_radiation(ghi_predicted_hrly.index)
+    dni_extra_hrly = pvlib.irradiance.get_extra_radiation(ghi_predicted_hrly_ts_center)
     ghi_extra_hrly = (dni_extra_hrly * cosd(hourly_zenith)).clip(lower=0)
 
     #use BRL model to decompose GHI into DHI, DNI
-    eqn_of_time = pvlib.solarposition.equation_of_time_spencer71(ghi_predicted_hrly.index.dayofyear)
-    ast = apparentsolartime(ghi_predicted_hrly.index, lon, eqn_of_time)
-    diffuse_frac = BRL_model_2010(ghi_predicted_hrly.index, ghi_predicted_hrly, ghi_extra_hrly, ast, hourly_zenith)
+    eqn_of_time = pvlib.solarposition.equation_of_time_spencer71(ghi_predicted_hrly_ts_center.dayofyear)
+    ast = apparentsolartime(ghi_predicted_hrly_ts_center, lon, eqn_of_time)
+    diffuse_frac = BRL_model_2010(ghi_predicted_hrly_ts_center, ghi_predicted_hrly, ghi_extra_hrly, ast, hourly_zenith)
     forecast_dhi, forecast_dni = decomposition_from_DHIfrac(diffuse_frac, hourly_zenith, ghi_predicted_hrly)
 
     #calculate hourly POA
@@ -507,11 +507,11 @@ def Antonanzas2018_model2(tracker_theta_ref,ghi_predicted_hrly,lat,lon,gcr=0.4,a
     
     #find hours where tracker should stow flat
     hourly_flat_flag = np.where(ghi_eff_forecast > poa_predicted_hrly, 1, 0)
-    hourly_flag_series = pd.Series(hourly_flat_flag, index=ghi_predicted_hrly.index - pd.Timedelta('30min'))
+    hourly_flag_series = pd.Series(hourly_flat_flag, index=ghi_predicted_hrly_ts_center - pd.Timedelta('30min'))
     
     #reindex flat periods to timeseries of module tilt angle
-    reindexed_flat_flag = hourly_flag_series.reindex(tracker_theta_ref.index, method='ffill').fillna(0).astype(bool)
-    tracker_theta = pd.Series(np.where(reindexed_flat_flag, 0.0, tracker_theta_ref),index=tracker_theta_ref.index)
+    reindexed_flat_flag = hourly_flag_series.reindex(ghi_predicted_hrly_ts_center, method='ffill').fillna(0).astype(bool)
+    tracker_theta = pd.Series(np.where(reindexed_flat_flag, 0.0, tracker_theta_ref),index=ghi_predicted_hrly_ts_center)
     
     #add tracker speed limit
     if tracker_speed is not None:
